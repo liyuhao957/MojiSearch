@@ -61,3 +61,7 @@ env/
 *_draft.md
 *_analysis.md
 debug_*
+
+# Claude AI Configuration
+.claude/
+CLAUDE.md
