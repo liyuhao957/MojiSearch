@@ -2,10 +2,11 @@
 主窗口界面
 """
 
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QScrollArea, 
-                           QGridLayout, QLabel, QGraphicsDropShadowEffect, QApplication)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QScrollArea, 
+                           QGridLayout, QLabel, QGraphicsDropShadowEffect, QApplication,
+                           QToolButton)
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QPixmap, QColor
+from PyQt6.QtGui import QPixmap, QColor, QCursor
 from src.managers.search import SearchManager
 from src.utils.loaders import CopyLoader
 
@@ -47,32 +48,67 @@ class MainWindow(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
         
+        # 搜索容器（包含搜索框和按钮）
+        search_container = QWidget()
+        search_container.setStyleSheet("""
+            QWidget {
+                background: rgba(255, 255, 255, 0.9);
+                border-radius: 10px;
+            }
+            QWidget:focus-within {
+                background: white;
+            }
+        """)
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(0)
+        
         # 搜索框
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("搜点什么...")
         self.search_input.setStyleSheet("""
             QLineEdit {
                 padding: 12px 16px;
+                padding-right: 40px;  /* 为按钮留出空间 */
                 font-size: 15px;
                 border: none;
-                border-radius: 10px;
-                background: rgba(255, 255, 255, 0.9);
+                background: transparent;
                 color: #2c2c2c;
-            }
-            QLineEdit:focus {
-                background: white;
-                outline: none;
             }
             QLineEdit::placeholder {
                 color: #999;
             }
         """)
         
-        # 搜索延迟
-        self.search_timer = QTimer()
-        self.search_timer.setSingleShot(True)
-        self.search_timer.timeout.connect(self.do_search)
-        self.search_input.textChanged.connect(self.on_search_changed)
+        # 搜索按钮
+        self.search_button = QToolButton()
+        self.search_button.setText("🔍")
+        self.search_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.search_button.setStyleSheet("""
+            QToolButton {
+                background: transparent;
+                border: none;
+                font-size: 16px;
+                padding: 8px 12px;
+                color: #999;
+            }
+            QToolButton:hover {
+                color: #666;
+                background: rgba(0, 0, 0, 0.05);
+                border-radius: 6px;
+            }
+            QToolButton:pressed {
+                color: #FF8200;
+            }
+        """)
+        
+        # 组装搜索容器
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(self.search_button)
+        
+        # 连接信号
+        self.search_input.returnPressed.connect(self.do_search)
+        self.search_button.clicked.connect(self.do_search)
         
         # 错误提示标签
         self.error_label = QLabel()
@@ -138,7 +174,7 @@ class MainWindow(QWidget):
         self.loading_label.hide()
         
         # 组装布局
-        layout.addWidget(self.search_input)
+        layout.addWidget(search_container)
         layout.addWidget(self.error_label)  # 错误提示
         layout.addWidget(self.scroll_area)
         layout.addWidget(self.loading_label)
@@ -176,12 +212,6 @@ class MainWindow(QWidget):
         else:
             self.loading_label.hide()
             
-    def on_search_changed(self):
-        """搜索框内容变化"""
-        self.search_timer.stop()
-        text = self.search_input.text().strip()
-        if text:
-            self.search_timer.start(500)
             
     def do_search(self):
         """执行搜索"""
@@ -249,10 +279,6 @@ class MainWindow(QWidget):
     
     def cleanup(self):
         """清理资源"""
-        # 停止搜索定时器
-        if hasattr(self, 'search_timer'):
-            self.search_timer.stop()
-        
         # 清理搜索管理器中的线程
         if hasattr(self, 'search_manager'):
             # 清理所有活动的图片加载线程
