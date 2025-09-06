@@ -196,7 +196,6 @@ class EmojiWidget(QLabel):
 
     def set_image_data(self, data: bytes, url: str):
         """智能设置图片数据（保持 QBuffer 生命周期，避免崩溃）"""
-        #  
         self._cleanup_resources()
         self.url = url
         self.original_data = data

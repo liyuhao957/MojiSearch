@@ -124,6 +124,24 @@ class MojiApp:
                         pass
         except Exception:
             pass
+        
+        try:
+            if sys.platform == "darwin":
+                self._hotkey_watchdog = QTimer()
+                self._hotkey_watchdog.setInterval(5000)
+                def _ensure():
+                    try:
+                        if hasattr(self, "global_hotkey") and not self.global_hotkey.isRunning():
+                            self.global_hotkey.start()
+                        if hasattr(self, "quit_hotkey") and not self.quit_hotkey.isRunning():
+                            self.quit_hotkey.start()
+                    except Exception:
+                        pass
+                self._hotkey_watchdog.timeout.connect(_ensure)
+                self._hotkey_watchdog.start()
+        except Exception:
+            pass
+
 
 
     def tray_clicked(self, reason):

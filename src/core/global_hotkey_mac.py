@@ -64,6 +64,20 @@ class GlobalHotkeyListener(QObject):
 
         def tap_callback(proxy, type_, event, refcon):  # noqa: N802 (C 接口)
             try:
+                # 系统可能会因为超时/用户输入临时禁用 Event Tap，需显式恢复
+                if hasattr(Quartz, "kCGEventTapDisabledByTimeout") and type_ == Quartz.kCGEventTapDisabledByTimeout:
+                    try:
+                        Quartz.CGEventTapEnable(self._tap, True)
+                    except Exception:
+                        pass
+                    return event
+                if hasattr(Quartz, "kCGEventTapDisabledByUserInput") and type_ == Quartz.kCGEventTapDisabledByUserInput:
+                    try:
+                        Quartz.CGEventTapEnable(self._tap, True)
+                    except Exception:
+                        pass
+                    return event
+
                 if type_ == Quartz.kCGEventKeyDown:
                     code = Quartz.CGEventGetIntegerValueField(
                         event, Quartz.kCGKeyboardEventKeycode
