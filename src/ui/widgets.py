@@ -4,7 +4,7 @@ UI 组件定义
 
 from PyQt6.QtWidgets import QLabel, QGraphicsDropShadowEffect
 from PyQt6.QtCore import Qt, pyqtSignal, QBuffer, QSize, QTimer
-from PyQt6.QtGui import QColor, QPixmap, QMovie
+from PyQt6.QtGui import QColor, QPixmap, QMovie, QImageReader
 from collections import deque
 
 
@@ -209,15 +209,41 @@ class EmojiWidget(QLabel):
             self.is_gif = False
     
     def _setup_static_display(self, data: bytes):
-        """设置静态图片显示"""
-        pixmap = QPixmap()
-        if pixmap.loadFromData(data):
-            self.static_pixmap = pixmap.scaled(
-                64, 64, Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.setPixmap(self.static_pixmap)
-    
+        """设置静态图片显示（使用 QImageReader 按目标尺寸解码，避免超大图触发 256MB 限制）"""
+        try:
+            buf = QBuffer()
+            buf.setData(data)
+            if not buf.open(QBuffer.OpenModeFlag.ReadOnly):
+                return
+
+            reader = QImageReader(buf)
+            reader.setAutoTransform(True)
+
+            # 目标边长（与现有 UI 保持一致）
+            target = 64
+            # 读取原始尺寸（只解析头，不会解码整图）
+            size = reader.size()
+            if size.isValid() and size.width() > 0 and size.height() > 0:
+                if size.width() >= size.height():
+                    w = target
+                    h = max(1, int(size.height() * target / size.width()))
+                else:
+                    h = target
+                    w = max(1, int(size.width() * target / size.height()))
+                reader.setScaledSize(QSize(w, h))
+            else:
+                # 如果读不到尺寸，退化为直接目标尺寸（可能会拉伸，但能避免超限）
+                reader.setScaledSize(QSize(target, target))
+
+            image = reader.read()
+            buf.close()
+            if not image.isNull():
+                self.static_pixmap = QPixmap.fromImage(image)
+                self.setPixmap(self.static_pixmap)
+        except Exception:
+            # 忽略个别格式异常，保持不显示（避免白块）
+            pass
+
     def _create_gif_badge(self):
         """创建 GIF 标识角标 - 支持 HiDPI"""
         if self.gif_badge:

@@ -5,8 +5,8 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QScrollArea,
                            QGridLayout, QLabel, QGraphicsDropShadowEffect, QApplication,
                            QToolButton)
-from PyQt6.QtCore import Qt, QTimer, QMimeData, QByteArray, QUrl
-from PyQt6.QtGui import QPixmap, QColor, QCursor
+from PyQt6.QtCore import Qt, QTimer, QMimeData, QByteArray, QUrl, QBuffer, QSize
+from PyQt6.QtGui import QPixmap, QColor, QCursor, QImageReader
 from src.managers.search import SearchManager
 from src.utils.loaders import CopyLoader
 
@@ -296,10 +296,31 @@ class MainWindow(QWidget):
 
             clipboard.setMimeData(mime_data)
         else:
-            # 静态图片直接复制为 Pixmap
-            pixmap = QPixmap()
-            if pixmap.loadFromData(data):
-                clipboard.setPixmap(pixmap)
+            # 使用 QImageReader 限制解码尺寸，避免触发 256MB 限制
+            try:
+                buf = QBuffer()
+                buf.setData(data)
+                if not buf.open(QBuffer.OpenModeFlag.ReadOnly):
+                    return
+                reader = QImageReader(buf)
+                reader.setAutoTransform(True)
+                # 限制最长边，保证剪贴板图片质量且安全
+                max_side = 1200
+                size = reader.size()
+                if size.isValid() and size.width() > 0 and size.height() > 0:
+                    if size.width() >= size.height():
+                        w = min(max_side, size.width())
+                        h = max(1, int(size.height() * w / size.width()))
+                    else:
+                        h = min(max_side, size.height())
+                        w = max(1, int(size.width() * h / size.height()))
+                    reader.setScaledSize(QSize(w, h))
+                image = reader.read()
+                buf.close()
+                if not image.isNull():
+                    clipboard.setPixmap(QPixmap.fromImage(image))
+            except Exception:
+                pass
 
         # 复制成功反馈 - 橙色闪烁
         self._show_copy_feedback()
