@@ -92,17 +92,27 @@ class MojiApp:
         self._setup_ipc_server()
 
 
-        # macOS 全局快捷键（Command+Shift+K）：尝试启用；失败时提示依赖/权限
+        # macOS 全局快捷键（Command+Shift+K 搜索；Command+Shift+E 退出）：尝试启用；失败时提示依赖/权限
         try:
             from src.core.global_hotkey_mac import GlobalHotkeyListener
             if sys.platform == "darwin":
+                # 打开搜索：Cmd+Shift+K
                 self.global_hotkey = GlobalHotkeyListener(mods=("cmd", "shift"), key="K")
                 try:
                     self.global_hotkey.hotkeyPressed.connect(lambda: self.open_search_popup())
                 except Exception:
                     pass
                 ok = self.global_hotkey.start()
-                if not ok:
+
+                # 退出应用：Cmd+Shift+E（避免与系统的 Cmd+Shift+Q“注销”冲突）
+                self.quit_hotkey = GlobalHotkeyListener(mods=("cmd", "shift"), key="E")
+                try:
+                    self.quit_hotkey.hotkeyPressed.connect(self.quit)
+                except Exception:
+                    pass
+                ok_quit = self.quit_hotkey.start()
+
+                if not (ok and ok_quit):
                     try:
                         self.tray.showMessage(
                             "Moji",

@@ -21,6 +21,8 @@ except Exception:  # 未安装 pyobjc 或环境不支持
 VK_MAP = {
     "SPACE": 49,
     "K": 40,
+    "Q": 12,
+    "E": 14,
 }
 
 # 修饰键掩码映射
