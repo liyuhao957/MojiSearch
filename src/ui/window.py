@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt, QTimer, QMimeData, QByteArray, QUrl, QBuffer, QSize
 from PyQt6.QtGui import QPixmap, QColor, QCursor, QImageReader
 from src.managers.search import SearchManager
 from src.utils.loaders import CopyLoader
+from src.ui.preview import PreviewOverlay
 
 import os, tempfile, uuid
 
@@ -179,6 +180,10 @@ class MainWindow(QWidget):
         layout.addWidget(search_container)
         layout.addWidget(self.error_label)  # 错误提示
         layout.addWidget(self.scroll_area)
+
+        # 预览浮层（悬停放大预览）
+        self.preview = PreviewOverlay(self)
+
         layout.addWidget(self.loading_label)
 
         # 窗口阴影
@@ -246,7 +251,54 @@ class MainWindow(QWidget):
                     )
                 except TypeError:
                     pass  # 已连接，忽略
+                # 悬停预览
+                try:
+                    widget.preview_requested.connect(
+                        self.on_preview_requested,
+                        Qt.ConnectionType.UniqueConnection
+                    )
+                except TypeError:
+                    pass
+                try:
+                    widget.preview_close.connect(
+                        self.on_preview_close,
+                        Qt.ConnectionType.UniqueConnection
+                    )
+                except TypeError:
+                    pass
                 widget._connected = True
+
+
+                # 确保预览信号已连接（即使之前已连接也不重复）
+                try:
+                    widget.preview_requested.connect(
+                        self.on_preview_requested,
+                        Qt.ConnectionType.UniqueConnection
+                    )
+                except TypeError:
+                    pass
+                try:
+                    widget.preview_close.connect(
+                        self.on_preview_close,
+                        Qt.ConnectionType.UniqueConnection
+                    )
+                except TypeError:
+                    pass
+
+    def on_preview_requested(self, url: str, data: bytes, is_gif: bool):
+        """接收子项悬停请求并显示预览"""
+        try:
+            self.preview.show_preview(data, is_gif, QCursor.pos())
+        except Exception:
+            pass
+
+    def on_preview_close(self):
+        """关闭悬停预览"""
+        try:
+            self.preview.hide_preview()
+        except Exception:
+            pass
+
 
     def copy_image_with_data(self, url: str, data: bytes, is_gif: bool):
         """复制图片到剪贴板（支持 GIF 格式）"""
