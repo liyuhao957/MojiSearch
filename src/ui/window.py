@@ -220,7 +220,7 @@ class MainWindow(QWidget):
             self.search_manager.do_search(keyword)
             
     def update_image(self, index, data):
-        """更新图片显示"""
+        """更新图片显示 - 使用UniqueConnection"""
         if index in self.search_manager.active_widgets:
             pixmap = QPixmap()
             pixmap.loadFromData(data)
@@ -229,12 +229,13 @@ class MainWindow(QWidget):
             widget = self.search_manager.active_widgets[index]
             widget.setPixmap(scaled)
             
-            # 连接点击事件
-            try:
-                widget.clicked.disconnect()
-            except:
-                pass
-            widget.clicked.connect(self.copy_image)
+            # 使用UniqueConnection避免重复连接
+            if not widget._connected:
+                widget.clicked.connect(
+                    self.copy_image,
+                    Qt.ConnectionType.UniqueConnection  # 关键！
+                )
+                widget._connected = True
             
     def copy_image(self, url):
         """复制图片到剪贴板（后台下载，避免UI阻塞）"""
@@ -278,14 +279,19 @@ class MainWindow(QWidget):
             self.hide()
     
     def cleanup(self):
-        """清理资源"""
+        """清理资源 - 使用优雅停止"""
         # 清理搜索管理器中的线程
         if hasattr(self, 'search_manager'):
-            # 清理所有活动的图片加载线程
+            # 使用优雅停止机制
             for loader in self.search_manager.loaders.values():
-                if loader.isRunning():
-                    loader.terminate()
-                    loader.wait(100)  # 等待最多100ms
+                loader.request_stop()
+            
+            # 等待线程自然退出
+            for loader in self.search_manager.loaders.values():
+                if not loader.wait(100):  # 等待100ms
+                    if loader.isRunning():
+                        loader.terminate()
+                        loader.wait(50)
             self.search_manager.loaders.clear()
         
         # 清理复制加载器

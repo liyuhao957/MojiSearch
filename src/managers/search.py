@@ -7,6 +7,8 @@ from PyQt6.QtGui import QPixmap
 from src.core.api import WeiboAPI
 from src.utils.loaders import ImageLoader
 from src.managers.virtual_scroll import VirtualScrollManager
+from src.utils.thread_pool import ImageThreadPool
+import time
 
 
 class SearchManager(QObject):
@@ -31,8 +33,18 @@ class SearchManager(QObject):
         self.virtual_manager = VirtualScrollManager(visible_rows=4, cols=4)
         self.active_widgets = {}  # 当前活动的widget {index: widget}
 
-        # 托管图片加载线程，防止提前销毁
-        self.loaders = {}
+        # 使用线程池替代原来的 self.loaders = {}
+        self.image_pool = ImageThreadPool(max_threads=8)
+        self.loaders = {}  # 保留以保持应急兼容性
+        
+        # 性能监控
+        self.metrics = {
+            'search_start_time': None,
+            'first_image_time': None,
+            'images_loaded': 0,
+            'errors': 0,
+            'cache_hits': 0
+        }
 
         # 使用顶部/底部占位，避免 QGridLayout 折叠离屏行
         self._use_spacers = True
@@ -42,9 +54,15 @@ class SearchManager(QObject):
         self._stretch_row = -1  # 用于将多余空间压到底部的拉伸行索引（spacer 启用时将跳过）
 
     def do_search(self, keyword):
-        """执行搜索"""
+        """执行搜索 - 记录开始时间"""
         if not keyword or keyword == self.keyword:
             return
+            
+        # 记录搜索开始时间
+        self.metrics['search_start_time'] = time.time()
+        self.metrics['first_image_time'] = None
+        self.metrics['images_loaded'] = 0
+        self.metrics['errors'] = 0
 
         self.keyword = keyword
         self.page = 1
@@ -61,14 +79,36 @@ class SearchManager(QObject):
         self.load_images()
 
     def clear_grid(self):
-        """清理网格 - 回收所有widget到池中"""
+        """清理网格 - 使用线程池的取消机制"""
+        # 取消所有图片加载任务
+        self.image_pool.cancel_all()
+        
+        # 兼容旧的loader逻辑
+        if self.loaders:
+            for loader in self.loaders.values():
+                if hasattr(loader, 'request_stop'):
+                    loader.request_stop()
+            for loader in self.loaders.values():
+                if not loader.wait(100):
+                    if loader.isRunning():
+                        print(f"Warning: Force terminating loader {loader.index}")
+                        loader.terminate()
+                        loader.wait(50)
+            self.loaders.clear()
+        
+        # 4. 回收widget
         for widget in self.active_widgets.values():
             self.virtual_manager.recycle_widget(widget)
         self.active_widgets.clear()
-
-        # 清理布局
+        
+        # 5. 清理布局
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
+            # 兜底处理非池化widget
+            if item and item.widget():
+                w = item.widget()
+                if w not in self.active_widgets.values():
+                    w.deleteLater()
 
     def load_images(self):
         """加载图片"""
@@ -187,18 +227,14 @@ class SearchManager(QObject):
                 widget = self.virtual_manager.get_widget()
                 widget.url = url
                 self.active_widgets[idx] = widget
-                # 异步加载图片（托管生命周期）
-                loader = ImageLoader(url, idx)
-                loader.image_loaded.connect(self._handle_image_loaded)
-                loader.error_occurred.connect(lambda msg: self.error_occurred.emit(msg))
-                if idx in self.loaders:
-                    old_loader = self.loaders[idx]
-                    if old_loader.isRunning():
-                        old_loader.terminate()
-                        old_loader.wait(100)
-                self.loaders[idx] = loader
-                loader.finished.connect(lambda i=idx: self.loaders.pop(i, None))
-                loader.start()
+                
+                # 使用线程池加载图片（替换原来的 ImageLoader）
+                self.image_pool.load_image(
+                    url, 
+                    idx,
+                    self._handle_image_loaded,
+                    lambda idx, code, msg: self.error_occurred.emit(f"[{idx}] {msg}")
+                )
 
             # 无论是否新建，都重置其在网格中的位置（防止 start_row 变化导致残留旧位置）
             widget = self.active_widgets[idx]
@@ -245,7 +281,14 @@ class SearchManager(QObject):
             self.error_occurred.emit(f"首屏渲染异常: {e}")
 
     def _handle_image_loaded(self, index, data):
-        """处理图片加载完成"""
+        """处理图片加载完成 - 记录性能数据"""
+        # 记录第一张图片加载时间
+        if self.metrics['first_image_time'] is None:
+            self.metrics['first_image_time'] = time.time()
+            ttfi = self.metrics['first_image_time'] - self.metrics['search_start_time']
+            print(f"[Performance] Time to first image: {ttfi:.2f}s")
+        
+        self.metrics['images_loaded'] += 1
         self.image_loaded.emit(index, data)
 
     def handle_scroll(self, value):
@@ -269,3 +312,16 @@ class SearchManager(QObject):
         scrollbar = self.scroll_area.verticalScrollBar()
         if scrollbar.value() >= scrollbar.maximum() - 100:
             self.load_more()
+    
+    def get_performance_stats(self):
+        """获取性能统计"""
+        if self.metrics['search_start_time']:
+            elapsed = time.time() - self.metrics['search_start_time']
+            return {
+                'elapsed': elapsed,
+                'images_loaded': self.metrics['images_loaded'],
+                'errors': self.metrics['errors'],
+                'avg_time': elapsed / max(1, self.metrics['images_loaded']),
+                'thread_count': len(self.image_pool.active_tasks)
+            }
+        return None

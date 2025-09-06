@@ -1,5 +1,2 @@
 # core module
-from src.core.app import MojiApp
-from src.core.api import WeiboAPI, SearchCache
-
-__all__ = ['MojiApp', 'WeiboAPI', 'SearchCache']
+# 避免循环导入，只在需要时导入

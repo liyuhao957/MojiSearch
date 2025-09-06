@@ -7,6 +7,7 @@ import time
 from urllib.parse import quote
 from collections import OrderedDict
 from datetime import datetime, timedelta
+from src.utils.network import NetworkManager
 
 
 class SearchCache:
@@ -49,41 +50,54 @@ class WeiboAPI:
 
     @classmethod
     def search(cls, keyword, page=1, max_retries=3, use_cache=True):
-        # 先检查缓存
+        """搜索微博表情包 - 使用Session复用连接"""
+        # 检查缓存
         if use_cache:
             cached = cls._cache.get(keyword, page)
             if cached:
                 return cached
-
+        
         params = {
             'containerid': f'100103type=63&q={quote(keyword)}&t=',
             'page': page
         }
-
+        
+        # 使用Session复用连接
+        session = NetworkManager.get_session()
+        
         for retry in range(max_retries):
             try:
-                response = requests.get(cls.BASE_URL, params=params,
-                                        headers=cls.HEADERS, timeout=10)
+                # 分离连接和读取超时
+                response = session.get(
+                    cls.BASE_URL,
+                    params=params,
+                    headers=cls.HEADERS,
+                    timeout=(2, 5),  # (连接超时, 读取超时)
+                    stream=False
+                )
+                
                 if response.status_code == 200:
                     images = cls._extract_images(response.json())
-                    # 存入缓存
                     if use_cache and images:
                         cls._cache.set(keyword, page, images)
                     return images
                 elif response.status_code == 432:
+                    # 反爬虫，等待后重试
                     time.sleep(2 * (retry + 1))
                     continue
                 else:
-                    raise Exception(f"API返回错误: {response.status_code}")
+                    raise Exception(f"API错误: {response.status_code}")
+                    
             except requests.exceptions.Timeout:
                 if retry == max_retries - 1:
-                    raise Exception("网络请求超时，请检查网络连接")
+                    raise Exception("请求超时")
             except requests.exceptions.ConnectionError:
                 if retry == max_retries - 1:
-                    raise Exception("无法连接到服务器，请检查网络")
+                    raise Exception("网络连接失败")
             except Exception as e:
                 if retry == max_retries - 1:
                     raise e
+        
         return []
 
     @classmethod

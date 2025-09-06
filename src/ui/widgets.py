@@ -4,7 +4,7 @@ UI 组件定义
 
 from PyQt6.QtWidgets import QLabel, QGraphicsDropShadowEffect
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPixmap
 
 
 class EmojiWidget(QLabel):
@@ -14,6 +14,7 @@ class EmojiWidget(QLabel):
     def __init__(self, url=""):
         super().__init__()
         self.url = url
+        self._connected = False  # 初始化连接标记
         self.setFixedSize(72, 72)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("""
@@ -49,3 +50,16 @@ class EmojiWidget(QLabel):
         """鼠标离开：恢复阴影"""
         self.shadow.setBlurRadius(8)
         self.shadow.setOffset(0, 2)
+    
+    def clear(self):
+        """清理widget资源，准备重用"""
+        # 清空显示
+        self.setPixmap(QPixmap())  
+        self.url = ""
+        
+        # 关键：断开信号并重置标记
+        try:
+            self.clicked.disconnect()
+        except:
+            pass
+        self._connected = False  # 必须重置！
