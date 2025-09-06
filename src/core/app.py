@@ -23,6 +23,17 @@ class MojiApp:
         # 设置应用实例引用，用于信号处理
         self.app.setApplicationName("Moji")
 
+        # macOS: 隐藏 Dock 中的 Python 图标（作为菜单栏/托盘应用运行）
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSApp, NSApplicationActivationPolicyAccessory
+                # 设为 Accessory：不显示 Dock 图标，但保留托盘/窗口能力
+                NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+            except Exception:
+                # 若未安装 pyobjc 或失败，则忽略（仍可正常运行，只是会显示图标）
+                pass
+
+
         # 创建定时器来处理 Python 信号
         self.signal_timer = QTimer()
         self.signal_timer.timeout.connect(lambda: None)  # 空操作，仅为了让事件循环处理信号
