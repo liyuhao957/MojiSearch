@@ -49,7 +49,7 @@ class ImageLoadTask(QRunnable):
         try:
             # 延迟导入以避免循环依赖
             from src.utils.network import NetworkManager
-            from src.utils.loaders import get_large_url
+            from src.utils.loaders import get_original_url
             from src.core.api import WeiboAPI
             
             # 使用thread-local session
@@ -57,7 +57,7 @@ class ImageLoadTask(QRunnable):
             
             # 分离超时，支持快速取消
             response = session.get(
-                get_large_url(self.url),
+                get_original_url(self.url),
                 headers=WeiboAPI.HEADERS,
                 timeout=(2, 5),  # 连接2秒，读取5秒
                 stream=True
@@ -68,51 +68,56 @@ class ImageLoadTask(QRunnable):
                 return
                 
             if response.status_code == 200:
-                # 分块读取，支持中断
+                # 分块读取，支持中断；在下载过程中尽早探测尺寸，过大则立刻中止
                 chunks = []
                 total_size = 0
-                max_size = 10 * 1024 * 1024  # 10MB限制
-                
+                max_size = 10 * 1024 * 1024  # 10MB限制（兜底）
+                header_probe = bytearray()
+                header_checked = False
+                MAX_PIXELS = 24_000_000   # 约24MP
+                MAX_DIM = 12000           # 任一边超过12000视为过大
+
                 for chunk in response.iter_content(chunk_size=16384):
                     if self.cancel_token.is_cancelled:
                         response.close()
                         return
-                        
-                    if chunk:
-                        chunks.append(chunk)
-                        total_size += len(chunk)
-                        
-                        # 防止下载过大文件
-                        if total_size > max_size:
-                            self.signals.error.emit(
-                                self.index, "SIZE_LIMIT", "图片过大"
-                            )
-                            response.close()
-                            return
-                
+                    if not chunk:
+                        continue
+
+                    chunks.append(chunk)
+                    total_size += len(chunk)
+
+                    # 1) 边下边探测尺寸，尽量只凭前面少量字节即可判断
+                    if not header_checked:
+                        try:
+                            header_probe.extend(chunk)
+                            if len(header_probe) >= 4096:  # 有足够头部数据再尝试
+                                buf = QBuffer()
+                                buf.setData(bytes(header_probe))
+                                if buf.open(QBuffer.OpenModeFlag.ReadOnly):
+                                    reader = QImageReader(buf)
+                                    size = reader.size()
+                                    buf.close()
+                                    if size.isValid():
+                                        w, h = size.width(), size.height()
+                                        if w * h > MAX_PIXELS or max(w, h) > MAX_DIM:
+                                            self.signals.error.emit(self.index, "TOO_LARGE", f"图片尺寸过大: {w}x{h}")
+                                            response.close()
+                                            return
+                                        header_checked = True
+                        except Exception:
+                            pass
+
+                    # 2) 字节数限制（兜底，防止少数格式长头部导致大流量）
+                    if total_size > max_size:
+                        self.signals.error.emit(self.index, "SIZE_LIMIT", "图片过大")
+                        response.close()
+                        return
+
                 # 完成下载
                 data = b''.join(chunks)
 
-                # 尺寸过滤：避免超大分辨率图片
-                try:
-                    buf = QBuffer()
-                    buf.setData(data)
-                    if buf.open(QBuffer.OpenModeFlag.ReadOnly):
-                        reader = QImageReader(buf)
-                        size = reader.size()
-                        buf.close()
-                        if size.isValid():
-                            w, h = size.width(), size.height()
-                            MAX_PIXELS = 24_000_000   # 约 24MP
-                            MAX_DIM = 12000            # 任一边超过 12000 视为过大
-                            if w * h > MAX_PIXELS or max(w, h) > MAX_DIM:
-                                # 不缓存，直接判定为过大
-                                self.signals.error.emit(self.index, "TOO_LARGE", f"图片尺寸过大: {w}x{h}")
-                                return
-                except Exception:
-                    pass
-
-                # 存入缓存
+                # 存入缓存并回调
                 image_cache.set(self.url, data)
                 if not self.cancel_token.is_cancelled:
                     self.signals.loaded.emit(self.index, data)

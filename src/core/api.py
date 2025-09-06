@@ -128,14 +128,66 @@ class WeiboAPI:
 
     @classmethod
     def _extract_images(cls, data):
+        """
+        从 API 响应提取图片 URL；尽可能使用返回的尺寸元数据在源头过滤“超大图”，
+        避免发起实际图片下载请求。
+        """
         images = []
+        seen = set()
         cards = data.get('data', {}).get('cards', [])
+        MAX_PIXELS = 24_000_000  # 与线程池侧阈值保持一致
+        MAX_DIM = 12000
+
+        def is_oversize(w, h):
+            try:
+                if w and h:
+                    w_i, h_i = int(w), int(h)
+                    return (w_i * h_i > MAX_PIXELS) or (max(w_i, h_i) > MAX_DIM)
+            except Exception:
+                return False
+            return False
+
         for card in cards:
-            if card.get('card_type') == 9:
-                mblog = card.get('mblog', {})
-                pics = mblog.get('pics', [])
-                for pic in pics:
-                    url = pic.get('large', {}).get('url') or pic.get('url', '')
-                    if url:
-                        images.append(url)
+            if card.get('card_type') != 9:
+                continue
+            mblog = card.get('mblog', {})
+
+            # 1) 先处理 mblog.pics
+            for pic in mblog.get('pics', []) or []:
+                url = (pic.get('large', {}) or {}).get('url') or pic.get('url', '')
+                if not url or url in seen:
+                    continue
+                lg = pic.get('large', {}) or {}
+                geo = pic.get('geo', {}) or {}
+                w = lg.get('w') or lg.get('width') or pic.get('w') or pic.get('width') or geo.get('width')
+                h = lg.get('h') or lg.get('height') or pic.get('h') or pic.get('height') or geo.get('height')
+                if is_oversize(w, h):
+                    continue
+                images.append(url)
+                seen.add(url)
+
+            # 2) 再处理 mblog.pic_infos（很多场景尺寸都在这里）
+            pic_infos = mblog.get('pic_infos', {}) or {}
+            if isinstance(pic_infos, dict):
+                for _pid, info in pic_infos.items():
+                    if not isinstance(info, dict):
+                        continue
+                    # 选取最佳可用 URL（优先 original/large/ largest）
+                    cand = (
+                        (info.get('original') or {}).get('url')
+                        or (info.get('largest') or {}).get('url')
+                        or (info.get('large') or {}).get('url')
+                        or info.get('url')
+                    )
+                    if not cand or cand in seen:
+                        continue
+                    # 提取尺寸：优先 original/large/largest 的 width/height；否则顶层
+                    size_src = info.get('original') or info.get('largest') or info.get('large') or {}
+                    w = size_src.get('width') or size_src.get('w') or info.get('width') or info.get('w')
+                    h = size_src.get('height') or size_src.get('h') or info.get('height') or info.get('h')
+                    if is_oversize(w, h):
+                        continue
+                    images.append(cand)
+                    seen.add(cand)
+
         return images
