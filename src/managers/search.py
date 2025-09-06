@@ -160,6 +160,45 @@ class SearchManager(QObject):
         if not self.loading and self.keyword and not self.no_more:
             self.load_images()
 
+    def _compute_visible_unfiltered(self, scroll_value: int, viewport_h: int):
+        """
+        计算在当前滚动位置应显示的“未被过滤”的索引+URL，确保足量填满视口。
+        返回 (base_start_idx, indices, visible_urls)
+        """
+        cols = self.virtual_manager.cols
+        rh = self.virtual_manager.row_height
+        rows_visible = max(1, int(viewport_h / rh))
+        target_count = (rows_visible + self.virtual_manager.buffer_rows * 2) * cols
+
+        # 以“未过滤行”的视角推导起始行/起始索引，避免被过滤项影响滚动映射
+        display_row = int(scroll_value / rh)
+        start_row_eff = max(0, display_row - self.virtual_manager.buffer_rows)
+        target_unfiltered_before = start_row_eff * cols
+
+        all_urls = self.virtual_manager.all_urls
+        total = len(all_urls)
+
+        # 寻找第一个使未过滤计数达到 target_unfiltered_before 的原始索引
+        base_start = 0
+        cnt = 0
+        i = 0
+        while i < total and cnt < target_unfiltered_before:
+            if i not in self.filtered_indices:
+                cnt += 1
+            i += 1
+        base_start = i
+
+        # 从 base_start 起收集未过滤的目标数量
+        indices = []
+        urls = []
+        i = base_start
+        while i < total and len(indices) < target_count:
+            if i not in self.filtered_indices:
+                indices.append(i)
+                urls.append(all_urls[i])
+            i += 1
+        return base_start, indices, urls
+
     def update_container_height(self):
         """根据总图片数量，设置容器最小高度，保证可滚动区域存在；并把多余空间压到底部"""
         cols = 4
@@ -191,7 +230,7 @@ class SearchManager(QObject):
         except Exception:
             pass
 
-    def update_visible_widgets(self, start_idx, urls):
+    def update_visible_widgets(self, start_idx, visible_indices, urls):
         """更新可视区域的widget，并用顶部/底部占位避免布局折叠"""
         cols = 4
         total = len(self.virtual_manager.all_urls)
@@ -199,16 +238,33 @@ class SearchManager(QObject):
         total_rows = max(1, (total + cols - 1) // cols)
 
         start_row = start_idx // cols
-        # end_row_exclusive：可视范围的“最后一行之后”的行号
+        # end_row_exclusive：按原始索引的连续范围估算（仅用于日志/兜底）
         end_row_exclusive = (start_idx + len(urls) + cols - 1) // cols
         visible_rows = max(0, end_row_exclusive - start_row)
 
-        # 1) 顶/底占位：用 setRowMinimumHeight 精确撑起离屏行高
+        # 1) 顶/底占位：按“非过滤条目”的行数精确撑起离屏行高，避免中间出现大空白
         if getattr(self, '_use_spacers', False):
-            top_h = start_row * rh
-            bottom_h = max(0, (total_rows - end_row_exclusive) * rh)
-            # 顶部占位固定在 row=0，底部占位固定在 row = visible_rows + 1
-            bottom_row = visible_rows + 1
+            # 计算 start 之前未被过滤的条目数 -> 有效起始行
+            filtered_before = sum(1 for i in self.filtered_indices if i < start_idx)
+            non_filtered_before = max(0, start_idx - filtered_before)
+            start_row_eff = non_filtered_before // cols
+
+            # 可见的“有效”行数
+            visible_count = len(visible_indices)
+            visible_rows_eff = max(0, (visible_count + cols - 1) // cols)
+
+            # 有效总行数（已扣除过滤项）
+            total_all = len(self.virtual_manager.all_urls)
+            filtered_count = sum(1 for i in self.filtered_indices if i < total_all)
+            total_eff = max(0, total_all - filtered_count)
+            total_rows_eff = max(1, (total_eff + cols - 1) // cols)
+
+            top_h = start_row_eff * rh
+            end_row_excl_eff = start_row_eff + visible_rows_eff
+            bottom_h = max(0, (total_rows_eff - end_row_excl_eff) * rh)
+
+            # 顶部占位固定在 row=0，底部占位固定在 row = visible_rows_eff + 1
+            bottom_row = visible_rows_eff + 1
             # 清除上次的 bottom_row 高度
             if hasattr(self, '_prev_bottom_row') and self._prev_bottom_row is not None and self._prev_bottom_row != bottom_row:
                 try:
@@ -224,8 +280,6 @@ class SearchManager(QObject):
             self._prev_bottom_row = bottom_row
 
         # 2) 渲染/复用可见区：统一使用“相对行号”，确保位于顶部占位之后
-        # 仅为未被过滤的索引创建/摆放组件，并按可见区紧凑排布
-        visible_indices = [start_idx + i for i in range(len(urls)) if (start_idx + i) not in self.filtered_indices]
         for j, idx in enumerate(visible_indices):
             url = self.virtual_manager.all_urls[idx]
             row = (j // cols) + 1              # +1：避开顶部占位行
@@ -265,19 +319,17 @@ class SearchManager(QObject):
         try:
             v = 0
             h = self.scroll_area.viewport().height()
-            start_idx, end_idx, visible_urls = self.virtual_manager.get_visible_range(v, h)
-            print(f"[first_render] h={h}, total={len(self.virtual_manager.all_urls)}, "
-                  f"range=({start_idx},{end_idx}), visible={len(visible_urls)}", flush=True)
-            self.update_visible_widgets(start_idx, visible_urls)
-            print(f"[first_render] after update layout_count={self.grid_layout.count()}, "
-                  f"active={len(self.active_widgets)}", flush=True)
+            start_idx, indices, visible_urls = self._compute_visible_unfiltered(v, h)
+            print(f"[first_render] h={h}, total={len(self.virtual_manager.all_urls)}, visible={len(visible_urls)}", flush=True)
+            self.update_visible_widgets(start_idx, indices, visible_urls)
+            print(f"[first_render] after update layout_count={self.grid_layout.count()}, active={len(self.active_widgets)}", flush=True)
             try:
                 gw = self.grid_layout.parentWidget()
                 vp = self.scroll_area.viewport()
                 print(f"[geom] grid_widget geom={gw.geometry()} viewport geom={vp.geometry()}", flush=True)
                 # 打印前4个可见卡片的相对几何
                 for i in range(min(4, len(visible_urls))):
-                    idx = start_idx + i
+                    idx = indices[i] if i < len(indices) else (start_idx + i)
                     w = self.active_widgets.get(idx)
                     if w:
                         print(f"[geom] idx={idx} visible={w.isVisible()} geom={w.geometry()} parent={w.parentWidget().__class__.__name__}", flush=True)
@@ -299,35 +351,43 @@ class SearchManager(QObject):
         self.image_loaded.emit(index, data)
 
     def _handle_image_error(self, index, code, message):
-        """处理图片加载错误；对超大图进行过滤并从UI中移除"""
+        """处理图片加载错误；统一为所有错误移除占位，避免出现“白块”"""
         # 计数
         try:
             self.metrics['errors'] += 1
         except Exception:
             pass
 
-        if code in ("TOO_LARGE", "SIZE_LIMIT"):
-            # 记录过滤索引
-            self.filtered_indices.add(index)
-            # 若该索引已有 widget，回收并移除
-            widget = self.active_widgets.pop(index, None)
-            if widget:
-                self.virtual_manager.recycle_widget(widget)
-            # 重新渲染当前可视区并更新容器高度（压缩排布，去掉空洞）
-            try:
-                self.update_container_height()
-                v = self.scroll_area.verticalScrollBar().value()
-                h = self.scroll_area.viewport().height()
-                start_idx, end_idx, visible_urls = self.virtual_manager.get_visible_range(v, h)
-                self.update_visible_widgets(start_idx, visible_urls)
-            except Exception:
-                pass
-        else:
-            # 其他错误走原有提示
-            try:
-                self.error_occurred.emit(f"[{index}] {message}")
-            except Exception:
-                pass
+        # 诊断日志：索引、错误码、消息、URL
+        try:
+            url = self.virtual_manager.all_urls[index] if 0 <= index < len(self.virtual_manager.all_urls) else ""
+            print(f"[img_error] idx={index} code={code} msg={message} url={url}", flush=True)
+        except Exception:
+            pass
+
+        # 统一策略：所有错误（包括 TIMEOUT/HTTP_xxx/CONNECTION/UNKNOWN）都过滤并回收
+        # 这样布局会立即压缩，不会留下空白占位
+        self.filtered_indices.add(index)
+        widget = self.active_widgets.pop(index, None)
+        if widget:
+            self.virtual_manager.recycle_widget(widget)
+
+        # 重新渲染当前可视区并更新容器高度（压缩排布，去掉空洞）
+        try:
+            self.update_container_height()
+            v = self.scroll_area.verticalScrollBar().value()
+            h = self.scroll_area.viewport().height()
+            start_idx, indices, visible_urls = self._compute_visible_unfiltered(v, h)
+            self.update_visible_widgets(start_idx, indices, visible_urls)
+        except Exception:
+            pass
+
+        # 同时提示用户（不过不阻塞 UI，也避免持续刷屏）
+        try:
+            # 精简提示：仅在首个错误或间隔性错误时显示
+            self.error_occurred.emit(f"[{index}] {message}")
+        except Exception:
+            pass
 
     def handle_scroll(self, value):
         """处理滚动事件"""
@@ -338,12 +398,10 @@ class SearchManager(QObject):
 
         # 获取可视范围
         container_height = self.scroll_area.viewport().height()
-        start_idx, end_idx, visible_urls = self.virtual_manager.get_visible_range(
-            value, container_height
-        )
+        start_idx, indices, visible_urls = self._compute_visible_unfiltered(value, container_height)
 
         # 更新可视区域的widget
-        self.update_visible_widgets(start_idx, visible_urls)
+        self.update_visible_widgets(start_idx, indices, visible_urls)
 
 
         # 检查是否需要加载更多
