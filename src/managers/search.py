@@ -32,11 +32,12 @@ class SearchManager(QObject):
         # 虚拟滚动管理
         self.virtual_manager = VirtualScrollManager(visible_rows=4, cols=4)
         self.active_widgets = {}  # 当前活动的widget {index: widget}
+        self.filtered_indices = set()  # 被过滤（超大图等）的索引集合
 
         # 使用线程池替代原来的 self.loaders = {}
         self.image_pool = ImageThreadPool(max_threads=8)
         self.loaders = {}  # 保留以保持应急兼容性
-        
+
         # 性能监控
         self.metrics = {
             'search_start_time': None,
@@ -57,7 +58,7 @@ class SearchManager(QObject):
         """执行搜索 - 记录开始时间"""
         if not keyword or keyword == self.keyword:
             return
-            
+
         # 记录搜索开始时间
         self.metrics['search_start_time'] = time.time()
         self.metrics['first_image_time'] = None
@@ -67,6 +68,7 @@ class SearchManager(QObject):
         self.keyword = keyword
         self.page = 1
         self.no_more = False
+        self.filtered_indices.clear()
 
         # 1. 先复位滚动条（在清空之前）
         self.scroll_area.verticalScrollBar().setValue(0)
@@ -82,7 +84,7 @@ class SearchManager(QObject):
         """清理网格 - 使用线程池的取消机制"""
         # 取消所有图片加载任务
         self.image_pool.cancel_all()
-        
+
         # 兼容旧的loader逻辑
         if self.loaders:
             for loader in self.loaders.values():
@@ -95,12 +97,13 @@ class SearchManager(QObject):
                         loader.terminate()
                         loader.wait(50)
             self.loaders.clear()
-        
+
         # 4. 回收widget
         for widget in self.active_widgets.values():
             self.virtual_manager.recycle_widget(widget)
         self.active_widgets.clear()
-        
+        self.filtered_indices.clear()
+
         # 5. 清理布局
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
@@ -160,7 +163,10 @@ class SearchManager(QObject):
     def update_container_height(self):
         """根据总图片数量，设置容器最小高度，保证可滚动区域存在；并把多余空间压到底部"""
         cols = 4
-        total = len(self.virtual_manager.all_urls)
+        total_all = len(self.virtual_manager.all_urls)
+        # 计算有效数量（过滤掉被标记的）
+        filtered_count = sum(1 for i in self.filtered_indices if i < total_all)
+        total = max(0, total_all - filtered_count)
         total_rows = max(1, (total + cols - 1) // cols)
         margins = self.grid_layout.contentsMargins()
         spacing = self.grid_layout.spacing()
@@ -218,32 +224,33 @@ class SearchManager(QObject):
             self._prev_bottom_row = bottom_row
 
         # 2) 渲染/复用可见区：统一使用“相对行号”，确保位于顶部占位之后
-        for i, url in enumerate(urls):
-            idx = start_idx + i
-            row = (idx // cols) - start_row + 1  # +1：避开顶部占位行
-            col = idx % cols
+        # 仅为未被过滤的索引创建/摆放组件，并按可见区紧凑排布
+        visible_indices = [start_idx + i for i in range(len(urls)) if (start_idx + i) not in self.filtered_indices]
+        for j, idx in enumerate(visible_indices):
+            url = self.virtual_manager.all_urls[idx]
+            row = (j // cols) + 1              # +1：避开顶部占位行
+            col = j % cols
 
             if idx not in self.active_widgets:
                 widget = self.virtual_manager.get_widget()
                 widget.url = url
                 self.active_widgets[idx] = widget
-                
-                # 使用线程池加载图片（替换原来的 ImageLoader）
+                # 使用线程池加载图片
                 self.image_pool.load_image(
-                    url, 
+                    url,
                     idx,
                     self._handle_image_loaded,
-                    lambda idx, code, msg: self.error_occurred.emit(f"[{idx}] {msg}")
+                    self._handle_image_error
                 )
 
-            # 无论是否新建，都重置其在网格中的位置（防止 start_row 变化导致残留旧位置）
+            # 摆放位置
             widget = self.active_widgets[idx]
             self.grid_layout.addWidget(widget, row, col)
             widget.show()
 
         # 3) 回收不在可视范围的widget
         to_remove = []
-        visible_set = set(range(start_idx, start_idx + len(urls)))
+        visible_set = set(visible_indices)
         for idx, widget in list(self.active_widgets.items()):
             if idx not in visible_set:
                 self.virtual_manager.recycle_widget(widget)
@@ -287,9 +294,40 @@ class SearchManager(QObject):
             self.metrics['first_image_time'] = time.time()
             ttfi = self.metrics['first_image_time'] - self.metrics['search_start_time']
             print(f"[Performance] Time to first image: {ttfi:.2f}s")
-        
+
         self.metrics['images_loaded'] += 1
         self.image_loaded.emit(index, data)
+
+    def _handle_image_error(self, index, code, message):
+        """处理图片加载错误；对超大图进行过滤并从UI中移除"""
+        # 计数
+        try:
+            self.metrics['errors'] += 1
+        except Exception:
+            pass
+
+        if code in ("TOO_LARGE", "SIZE_LIMIT"):
+            # 记录过滤索引
+            self.filtered_indices.add(index)
+            # 若该索引已有 widget，回收并移除
+            widget = self.active_widgets.pop(index, None)
+            if widget:
+                self.virtual_manager.recycle_widget(widget)
+            # 重新渲染当前可视区并更新容器高度（压缩排布，去掉空洞）
+            try:
+                self.update_container_height()
+                v = self.scroll_area.verticalScrollBar().value()
+                h = self.scroll_area.viewport().height()
+                start_idx, end_idx, visible_urls = self.virtual_manager.get_visible_range(v, h)
+                self.update_visible_widgets(start_idx, visible_urls)
+            except Exception:
+                pass
+        else:
+            # 其他错误走原有提示
+            try:
+                self.error_occurred.emit(f"[{index}] {message}")
+            except Exception:
+                pass
 
     def handle_scroll(self, value):
         """处理滚动事件"""
@@ -312,7 +350,7 @@ class SearchManager(QObject):
         scrollbar = self.scroll_area.verticalScrollBar()
         if scrollbar.value() >= scrollbar.maximum() - 100:
             self.load_more()
-    
+
     def get_performance_stats(self):
         """获取性能统计"""
         if self.metrics['search_start_time']:

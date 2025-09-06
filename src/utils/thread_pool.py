@@ -2,7 +2,8 @@
 线程池管理器 - 优化图片加载性能
 """
 
-from PyQt6.QtCore import QThreadPool, QRunnable, pyqtSignal, QObject, Qt
+from PyQt6.QtCore import QThreadPool, QRunnable, pyqtSignal, QObject, Qt, QBuffer
+from PyQt6.QtGui import QImageReader
 import requests
 
 class TaskSignals(QObject):
@@ -91,6 +92,26 @@ class ImageLoadTask(QRunnable):
                 
                 # 完成下载
                 data = b''.join(chunks)
+
+                # 尺寸过滤：避免超大分辨率图片
+                try:
+                    buf = QBuffer()
+                    buf.setData(data)
+                    if buf.open(QBuffer.OpenModeFlag.ReadOnly):
+                        reader = QImageReader(buf)
+                        size = reader.size()
+                        buf.close()
+                        if size.isValid():
+                            w, h = size.width(), size.height()
+                            MAX_PIXELS = 24_000_000   # 约 24MP
+                            MAX_DIM = 12000            # 任一边超过 12000 视为过大
+                            if w * h > MAX_PIXELS or max(w, h) > MAX_DIM:
+                                # 不缓存，直接判定为过大
+                                self.signals.error.emit(self.index, "TOO_LARGE", f"图片尺寸过大: {w}x{h}")
+                                return
+                except Exception:
+                    pass
+
                 # 存入缓存
                 image_cache.set(self.url, data)
                 if not self.cancel_token.is_cancelled:
