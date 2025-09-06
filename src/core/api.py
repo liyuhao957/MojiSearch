@@ -50,21 +50,26 @@ class WeiboAPI:
 
     @classmethod
     def search(cls, keyword, page=1, max_retries=3, use_cache=True):
-        """搜索微博表情包 - 使用Session复用连接"""
+        """搜索微博表情包 - 使用Session复用连接
+        注意：此前当服务器触发反爬（HTTP 432 或 ok!=1）时，函数会在重试后直接
+        返回空列表，导致 UI 误以为“没有找到相关表情”。这里将其改为明确地识别
+        反爬并最终抛出异常，交由上层显示错误提示。"""
         # 检查缓存
         if use_cache:
             cached = cls._cache.get(keyword, page)
             if cached:
                 return cached
-        
+
         params = {
             'containerid': f'100103type=63&q={quote(keyword)}&t=',
             'page': page
         }
-        
+
         # 使用Session复用连接
         session = NetworkManager.get_session()
-        
+
+        anti_spider_hit = False
+
         for retry in range(max_retries):
             try:
                 # 分离连接和读取超时
@@ -75,19 +80,37 @@ class WeiboAPI:
                     timeout=(2, 5),  # (连接超时, 读取超时)
                     stream=False
                 )
-                
+
                 if response.status_code == 200:
-                    images = cls._extract_images(response.json())
+                    data = response.json()
+                    # 有时 ok!=1 表示被限流/反爬，虽然返回 200，但没有数据
+                    if isinstance(data, dict) and data.get('ok') not in (1, '1'):
+                        anti_spider_hit = True
+                        time.sleep(1.2 * (retry + 1))
+                        # 轻量预热一次主页以尝试获取必要的 cookie
+                        try:
+                            session.get('https://m.weibo.cn/', headers=cls.HEADERS, timeout=(2, 5))
+                        except Exception:
+                            pass
+                        continue
+
+                    images = cls._extract_images(data)
                     if use_cache and images:
                         cls._cache.set(keyword, page, images)
                     return images
-                elif response.status_code == 432:
-                    # 反爬虫，等待后重试
-                    time.sleep(2 * (retry + 1))
+                elif response.status_code in (430, 431, 432, 418):
+                    # 反爬虫/请求过于频繁
+                    anti_spider_hit = True
+                    time.sleep(1.2 * (retry + 1))
+                    # 预热主页后再试
+                    try:
+                        session.get('https://m.weibo.cn/', headers=cls.HEADERS, timeout=(2, 5))
+                    except Exception:
+                        pass
                     continue
                 else:
                     raise Exception(f"API错误: {response.status_code}")
-                    
+
             except requests.exceptions.Timeout:
                 if retry == max_retries - 1:
                     raise Exception("请求超时")
@@ -97,7 +120,10 @@ class WeiboAPI:
             except Exception as e:
                 if retry == max_retries - 1:
                     raise e
-        
+
+        if anti_spider_hit:
+            raise Exception("请求过于频繁或被微博反爬限制，请稍后重试")
+
         return []
 
     @classmethod
